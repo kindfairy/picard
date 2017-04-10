@@ -36,7 +36,7 @@ import picard.analysis.directed.InsertSizeMetricsCollector;
 import picard.cmdline.CommandLineProgramProperties;
 import picard.cmdline.Option;
 import picard.cmdline.programgroups.Metrics;
-import picard.util.RExecutor;
+//import picard.util.RExecutor;
 
 import java.io.File;
 import java.util.Set;

@@ -34,7 +34,7 @@ import picard.cmdline.CommandLineProgramProperties;
 import picard.cmdline.Option;
 import picard.cmdline.programgroups.Metrics;
 import picard.metrics.GcBiasMetrics;
-import picard.util.RExecutor;
+//import picard.util.RExecutor;
 
 import java.io.File;
 import java.text.NumberFormat;
@@ -49,7 +49,7 @@ import java.util.Set;
  * to the average number of reads per window across the whole genome.
  *
  * @author Tim Fennell
- * edited by Kylee Bergin
+ *         edited by Kylee Bergin
  */
 @CommandLineProgramProperties(
         usage = CollectGcBiasMetrics.USAGE_SUMMARY + CollectGcBiasMetrics.USAGE_DETAILS,
@@ -93,25 +93,27 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
             "mean coverage (e.g. 3.1 means this GC bin has 3.1 times more reads per window than average).  " +
             "" +
             "This tool also tracks mean base-quality scores of the reads within each GC content bin, enabling the user to determine " +
-            "how base quality scores vary with GC content.  <br /> <br />"+
+            "how base quality scores vary with GC content.  <br /> <br />" +
             "" +
             "The chart output associated with this data table plots the NORMALIZED_COVERAGE, the distribution of WINDOWs corresponding " +
-            "to GC percentages, and base qualities corresponding to each %GC bin."+
+            "to GC percentages, and base qualities corresponding to each %GC bin." +
             "<p>Note: Metrics labeled as percentages are actually expressed as fractions!</p>" +
-            "<h4>Usage Example:</h4>"+
+            "<h4>Usage Example:</h4>" +
             "<pre>" +
-            "java -jar picard.jar CollectGcBiasMetrics \\<br />"+
-            "      I=input.bam \\<br />"+
-            "      O=gc_bias_metrics.txt \\<br />"+
-            "      CHART=gc_bias_metrics.pdf \\<br />"+
-            "      S=summary_metrics.txt \\<br />"+
-            "      R=reference_sequence.fasta"+
-            "</pre>"+
+            "java -jar picard.jar CollectGcBiasMetrics \\<br />" +
+            "      I=input.bam \\<br />" +
+            "      O=gc_bias_metrics.txt \\<br />" +
+            "      CHART=gc_bias_metrics.pdf \\<br />" +
+            "      S=summary_metrics.txt \\<br />" +
+            "      R=reference_sequence.fasta" +
+            "</pre>" +
             "Please see <a href='https://broadinstitute.github.io/picard/picard-metric-definitions.html#GcBiasMetrics'>" +
             "the GcBiasMetrics documentation</a> for further explanations of each metric." +
             "<hr />";
-    /** The location of the R script to do the plotting. */
-    private static final String R_SCRIPT = "picard/analysis/gcBias.R";
+    /**
+     * The location of the R script to do the plotting.
+     */
+    //private static final String R_SCRIPT = "picard/analysis/gcBias.R";
 
     // Usage and parameters
 
@@ -204,11 +206,13 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
 
         final NumberFormat fmt = NumberFormat.getIntegerInstance();
         fmt.setGroupingUsed(true);
+        /*
         RExecutor.executeFromClasspath(R_SCRIPT,
                 OUTPUT.getAbsolutePath(),
                 SUMMARY_OUTPUT.getAbsolutePath(),
                 CHART_OUTPUT.getAbsolutePath(),
                 String.valueOf(SCAN_WINDOW_SIZE));
+                */
     }
 }
 
