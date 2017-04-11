@@ -44,6 +44,7 @@ import picard.cmdline.StandardOptionDefinitions;
 import java.io.File;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Iterator;
 
 /**
  * Super class that is designed to provide some consistent structure between subclasses that
@@ -95,8 +96,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         final SamReader in = SamReaderFactory.makeDefault().referenceSequence(referenceSequence).open(input);
 
         finish = System.nanoTime();
-        System.out.println(">>>\tSetup the standard inputs: " + (finish-start)/1_000_000_000.0 + "sec");
-
+        System.out.println(">>>\tSetup the standard inputs: " + (finish - start) / 1_000_000_000.0 + "sec");
 
 
         start = System.nanoTime();
@@ -116,9 +116,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         }
 
         finish = System.nanoTime();
-        System.out.println(">>>\tOptionally load up the reference sequence and double check sequence dictionaries: " + (finish-start)/1_000_000_000.0 + "sec");
-
-
+        System.out.println(">>>\tOptionally load up the reference sequence and double check sequence dictionaries: " + (finish - start) / 1_000_000_000.0 + "sec");
 
 
         start = System.nanoTime();
@@ -138,9 +136,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         }
 
         finish = System.nanoTime();
-        System.out.println(">>>\tCheck on the sort order of the BAM file: " + (finish-start)/1_000_000_000.0 + "sec");
-
-
+        System.out.println(">>>\tCheck on the sort order of the BAM file: " + (finish - start) / 1_000_000_000.0 + "sec");
 
 
         start = System.nanoTime();
@@ -153,29 +149,51 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         }
 
         finish = System.nanoTime();
-        System.out.println(">>>\tCall the abstract setup method!: " + (finish-start)/1_000_000_000.0 + "sec");
+        System.out.println(">>>\tCall the abstract setup method!: " + (finish - start) / 1_000_000_000.0 + "sec");
 
 
-
+        long readingTime = 0;
+        long processingTime = 0;
+        long wrintgTime = 0;
+        long timeInterval = 0;
 
 
         start = System.nanoTime();
 
         final ProgressLogger progress = new ProgressLogger(log);
 
-        for (final SAMRecord rec : in) {
+
+        Iterator<SAMRecord> it = in.iterator();
+        while (it.hasNext()) {
+            timeInterval = System.nanoTime();
+            final SAMRecord rec = it.next();
             final ReferenceSequence ref;
             if (walker == null || rec.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
                 ref = null;
             } else {
                 ref = walker.get(rec.getReferenceIndex());
             }
+            timeInterval = System.nanoTime() - timeInterval;
+            readingTime += timeInterval;
 
+
+
+            timeInterval = System.nanoTime();
             for (final SinglePassSamProgram program : programs) {
                 program.acceptRead(rec, ref);
             }
+            timeInterval = System.nanoTime() - timeInterval;
+            processingTime += timeInterval;
 
+
+
+            timeInterval = System.nanoTime();
             progress.record(rec);
+            timeInterval = System.nanoTime() - timeInterval;
+            wrintgTime += timeInterval;
+
+
+
 
             // See if we need to terminate early?
             if (stopAfter > 0 && progress.getCount() >= stopAfter) {
@@ -189,13 +207,12 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         }
 
         finish = System.nanoTime();
-        System.out.println(">>>\tfor loop: " + (finish-start)/1_000_000_000.0 + "sec");
-
-
-
+        System.out.println(">>>\tfor loop: " + (finish - start) / 1_000_000_000.0 + "sec");
+        System.out.println(">>>\t>>>\treadingTime: " + readingTime / 1_000_000_000.0 + "sec");
+        System.out.println(">>>\t>>>\tprocessingTime: " + processingTime / 1_000_000_000.0 + "sec");
+        System.out.println(">>>\t>>>\twrintgTime: " + wrintgTime / 1_000_000_000.0 + "sec");
 
         CloserUtil.close(in);
-
 
 
         start = System.nanoTime();
@@ -205,13 +222,19 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         }
 
         finish = System.nanoTime();
-        System.out.println(">>>\tprogram.finish(): " + (finish-start)/1_000_000_000.0 + "sec");
+        System.out.println(">>>\tprogram.finish(): " + (finish - start) / 1_000_000_000.0 + "sec");
     }
 
-    /** Can be overriden and set to false if the section of unmapped reads at the end of the file isn't needed. */
-    protected boolean usesNoRefReads() { return true; }
+    /**
+     * Can be overriden and set to false if the section of unmapped reads at the end of the file isn't needed.
+     */
+    protected boolean usesNoRefReads() {
+        return true;
+    }
 
-    /** Should be implemented by subclasses to do one-time initialization work. */
+    /**
+     * Should be implemented by subclasses to do one-time initialization work.
+     */
     protected abstract void setup(final SAMFileHeader header, final File samFile);
 
     /**
@@ -221,7 +244,9 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
      */
     protected abstract void acceptRead(final SAMRecord rec, final ReferenceSequence ref);
 
-    /** Should be implemented by subclasses to do one-time finalization work. */
+    /**
+     * Should be implemented by subclasses to do one-time finalization work.
+     */
     protected abstract void finish();
 
 }
