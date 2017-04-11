@@ -84,9 +84,22 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
                                 final long stopAfter,
                                 final Collection<SinglePassSamProgram> programs) {
 
+        //time measuring
+        long start = 0;
+        long finish = 0;
+
+        start = System.nanoTime();
+
         // Setup the standard inputs
         IOUtil.assertFileIsReadable(input);
         final SamReader in = SamReaderFactory.makeDefault().referenceSequence(referenceSequence).open(input);
+
+        finish = System.nanoTime();
+        System.out.println(">>>\tSetup the standard inputs: " + (finish-start)/1_000_000_000.0 + "sec");
+
+
+
+        start = System.nanoTime();
 
         // Optionally load up the reference sequence and double check sequence dictionaries
         final ReferenceSequenceFileWalker walker;
@@ -102,6 +115,14 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             }
         }
 
+        finish = System.nanoTime();
+        System.out.println(">>>\tOptionally load up the reference sequence and double check sequence dictionaries: " + (finish-start)/1_000_000_000.0 + "sec");
+
+
+
+
+        start = System.nanoTime();
+
         // Check on the sort order of the BAM file
         {
             final SortOrder sort = in.getFileHeader().getSortOrder();
@@ -116,6 +137,14 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             }
         }
 
+        finish = System.nanoTime();
+        System.out.println(">>>\tCheck on the sort order of the BAM file: " + (finish-start)/1_000_000_000.0 + "sec");
+
+
+
+
+        start = System.nanoTime();
+
         // Call the abstract setup method!
         boolean anyUseNoRefReads = false;
         for (final SinglePassSamProgram program : programs) {
@@ -123,6 +152,14 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             anyUseNoRefReads = anyUseNoRefReads || program.usesNoRefReads();
         }
 
+        finish = System.nanoTime();
+        System.out.println(">>>\tCall the abstract setup method!: " + (finish-start)/1_000_000_000.0 + "sec");
+
+
+
+
+
+        start = System.nanoTime();
 
         final ProgressLogger progress = new ProgressLogger(log);
 
@@ -151,11 +188,24 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             }
         }
 
+        finish = System.nanoTime();
+        System.out.println(">>>\tfor loop: " + (finish-start)/1_000_000_000.0 + "sec");
+
+
+
+
         CloserUtil.close(in);
+
+
+
+        start = System.nanoTime();
 
         for (final SinglePassSamProgram program : programs) {
             program.finish();
         }
+
+        finish = System.nanoTime();
+        System.out.println(">>>\tprogram.finish(): " + (finish-start)/1_000_000_000.0 + "sec");
     }
 
     /** Can be overriden and set to false if the section of unmapped reads at the end of the file isn't needed. */
