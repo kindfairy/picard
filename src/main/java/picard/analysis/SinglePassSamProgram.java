@@ -36,15 +36,18 @@ import htsjdk.samtools.util.IOUtil;
 import htsjdk.samtools.util.Log;
 import htsjdk.samtools.util.ProgressLogger;
 import htsjdk.samtools.util.SequenceUtil;
+import javafx.util.Pair;
 import picard.PicardException;
 import picard.cmdline.CommandLineProgram;
 import picard.cmdline.Option;
 import picard.cmdline.StandardOptionDefinitions;
 
 import java.io.File;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Iterator;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Super class that is designed to provide some consistent structure between subclasses that
@@ -54,6 +57,8 @@ import java.util.Iterator;
  * @author Tim Fennell
  */
 public abstract class SinglePassSamProgram extends CommandLineProgram {
+    private static final int MAX_SIZE = 1000;
+    private static final int SEMAPHORE_PERMITS = 5;
     @Option(shortName = StandardOptionDefinitions.INPUT_SHORT_NAME, doc = "Input SAM or BAM file.")
     public File INPUT;
 
@@ -152,48 +157,60 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         System.out.println(">>>\tCall the abstract setup method!: " + (finish - start) / 1_000_000_000.0 + "sec");
 
 
-        long readingTime = 0;
-        long processingTime = 0;
-        long wrintgTime = 0;
-        long timeInterval = 0;
-
-
         start = System.nanoTime();
 
         final ProgressLogger progress = new ProgressLogger(log);
+        ExecutorService refReadService = Executors.newSingleThreadExecutor();
+        ExecutorService acceptReadService = Executors.newSingleThreadExecutor();
+        Semaphore semaphore = new Semaphore(SEMAPHORE_PERMITS);
 
+
+        List<SAMRecord> records = new ArrayList<>(MAX_SIZE);
 
         Iterator<SAMRecord> it = in.iterator();
         while (it.hasNext()) {
-            timeInterval = System.nanoTime();
-            final SAMRecord rec = it.next();
-            final ReferenceSequence ref;
-            if (walker == null || rec.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
-                ref = null;
-            } else {
-                ref = walker.get(rec.getReferenceIndex());
+
+
+            final SAMRecord record = it.next();
+            records.add(record);
+
+            if( records.size() == MAX_SIZE ) {
+
+                semaphore.acquireUninterruptibly();
+                final List<SAMRecord> tmpRecords = records;
+                records = new ArrayList<>(MAX_SIZE);
+
+                refReadService.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
+                        for( SAMRecord tmpRecord: tmpRecords ) {
+                            final ReferenceSequence ref;
+                            if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
+                                ref = null;
+                            } else {
+                                ref = walker.get(tmpRecord.getReferenceIndex());
+                            }
+                            pairs.add(new Pair<>(tmpRecord, ref));
+                        }
+                        acceptReadService.submit(new Runnable() {
+                            @Override
+                            public void run() {
+                                for (Pair<SAMRecord, ReferenceSequence> pair: pairs){
+                                    for (final SinglePassSamProgram program : programs) {
+                                        program.acceptRead(pair.getKey(), pair.getValue());
+                                    }
+                                }
+                                semaphore.release();
+                            }
+                        });
+                    }
+                });
+
             }
-            timeInterval = System.nanoTime() - timeInterval;
-            readingTime += timeInterval;
 
 
-
-            timeInterval = System.nanoTime();
-            for (final SinglePassSamProgram program : programs) {
-                program.acceptRead(rec, ref);
-            }
-            timeInterval = System.nanoTime() - timeInterval;
-            processingTime += timeInterval;
-
-
-
-            timeInterval = System.nanoTime();
-            progress.record(rec);
-            timeInterval = System.nanoTime() - timeInterval;
-            wrintgTime += timeInterval;
-
-
-
+            progress.record(record);
 
             // See if we need to terminate early?
             if (stopAfter > 0 && progress.getCount() >= stopAfter) {
@@ -201,16 +218,67 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             }
 
             // And see if we're into the unmapped reads at the end
-            if (!anyUseNoRefReads && rec.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
+            if (!anyUseNoRefReads && record.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
                 break;
             }
         }
+        {
+            semaphore.acquireUninterruptibly();
+            List<SAMRecord> tmpRecords = records;
+
+            refReadService.submit(new Runnable() {
+                @Override
+                public void run() {
+                    List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
+                    for( SAMRecord tmpRecord: tmpRecords ){
+                        final ReferenceSequence ref;
+                        if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
+                            ref = null;
+                        } else {
+                            ref = walker.get(tmpRecord.getReferenceIndex());
+                        }
+                        pairs.add(new Pair<>(tmpRecord, ref));
+                    }
+                    acceptReadService.submit(new Runnable() {
+                        @Override
+                        public void run() {
+                            for (Pair<SAMRecord, ReferenceSequence> pair: pairs){
+                                for (final SinglePassSamProgram program : programs) {
+                                    program.acceptRead(pair.getKey(), pair.getValue());
+                                }
+                            }
+                            semaphore.release();
+                        }
+                    });
+                }
+            });
+        }
+
+        refReadService.shutdown();
+        try {
+            refReadService.awaitTermination(1, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        acceptReadService.shutdown();
+        try {
+            acceptReadService.awaitTermination(1, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
 
         finish = System.nanoTime();
         System.out.println(">>>\tfor loop: " + (finish - start) / 1_000_000_000.0 + "sec");
-        System.out.println(">>>\t>>>\treadingTime: " + readingTime / 1_000_000_000.0 + "sec");
-        System.out.println(">>>\t>>>\tprocessingTime: " + processingTime / 1_000_000_000.0 + "sec");
-        System.out.println(">>>\t>>>\twrintgTime: " + wrintgTime / 1_000_000_000.0 + "sec");
+
+
+
+
+
+
+
+
+
 
         CloserUtil.close(in);
 
