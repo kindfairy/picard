@@ -90,21 +90,11 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
                                 final long stopAfter,
                                 final Collection<SinglePassSamProgram> programs) {
 
-        //time measuring
-        long start = 0;
-        long finish = 0;
-
-        start = System.nanoTime();
 
         // Setup the standard inputs
         IOUtil.assertFileIsReadable(input);
         final SamReader in = SamReaderFactory.makeDefault().referenceSequence(referenceSequence).open(input);
 
-        finish = System.nanoTime();
-        System.out.println(">>>\tSetup the standard inputs: " + (finish - start) / 1_000_000_000.0 + "sec");
-
-
-        start = System.nanoTime();
 
         // Optionally load up the reference sequence and double check sequence dictionaries
         final ReferenceSequenceFileWalker walker;
@@ -120,12 +110,6 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             }
         }
 
-        finish = System.nanoTime();
-        System.out.println(">>>\tOptionally load up the reference sequence and double check sequence dictionaries: " + (finish - start) / 1_000_000_000.0 + "sec");
-
-
-        start = System.nanoTime();
-
         // Check on the sort order of the BAM file
         {
             final SortOrder sort = in.getFileHeader().getSortOrder();
@@ -140,11 +124,6 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             }
         }
 
-        finish = System.nanoTime();
-        System.out.println(">>>\tCheck on the sort order of the BAM file: " + (finish - start) / 1_000_000_000.0 + "sec");
-
-
-        start = System.nanoTime();
 
         // Call the abstract setup method!
         boolean anyUseNoRefReads = false;
@@ -153,18 +132,19 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             anyUseNoRefReads = anyUseNoRefReads || program.usesNoRefReads();
         }
 
-        finish = System.nanoTime();
-        System.out.println(">>>\tCall the abstract setup method!: " + (finish - start) / 1_000_000_000.0 + "sec");
-
-
-        start = System.nanoTime();
 
         final ProgressLogger progress = new ProgressLogger(log);
+
+        //one particular thread for reading a ReferenceSequence from walker
         ExecutorService refReadService = Executors.newSingleThreadExecutor();
+
+        //one particular thread for executing method program.acceptRead()
         ExecutorService acceptReadService = Executors.newSingleThreadExecutor();
+
+        //Limit for tasks into services' queues
         Semaphore semaphore = new Semaphore(SEMAPHORE_PERMITS);
 
-
+        //chunk of SAMRecords
         List<SAMRecord> records = new ArrayList<>(MAX_SIZE);
 
         Iterator<SAMRecord> it = in.iterator();
@@ -174,7 +154,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             final SAMRecord record = it.next();
             records.add(record);
 
-            if( records.size() == MAX_SIZE ) {
+            if (records.size() == MAX_SIZE) {
 
                 semaphore.acquireUninterruptibly();
                 final List<SAMRecord> tmpRecords = records;
@@ -184,7 +164,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
                     @Override
                     public void run() {
                         List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
-                        for( SAMRecord tmpRecord: tmpRecords ) {
+                        for (SAMRecord tmpRecord : tmpRecords) {
                             final ReferenceSequence ref;
                             if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
                                 ref = null;
@@ -196,7 +176,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
                         acceptReadService.submit(new Runnable() {
                             @Override
                             public void run() {
-                                for (Pair<SAMRecord, ReferenceSequence> pair: pairs){
+                                for (Pair<SAMRecord, ReferenceSequence> pair : pairs) {
                                     for (final SinglePassSamProgram program : programs) {
                                         program.acceptRead(pair.getKey(), pair.getValue());
                                     }
@@ -222,6 +202,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
                 break;
             }
         }
+        //need to process last chunk with size < MAX_SIZE
         {
             semaphore.acquireUninterruptibly();
             List<SAMRecord> tmpRecords = records;
@@ -230,7 +211,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
                 @Override
                 public void run() {
                     List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
-                    for( SAMRecord tmpRecord: tmpRecords ){
+                    for (SAMRecord tmpRecord : tmpRecords) {
                         final ReferenceSequence ref;
                         if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
                             ref = null;
@@ -242,7 +223,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
                     acceptReadService.submit(new Runnable() {
                         @Override
                         public void run() {
-                            for (Pair<SAMRecord, ReferenceSequence> pair: pairs){
+                            for (Pair<SAMRecord, ReferenceSequence> pair : pairs) {
                                 for (final SinglePassSamProgram program : programs) {
                                     program.acceptRead(pair.getKey(), pair.getValue());
                                 }
@@ -254,6 +235,8 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             });
         }
 
+        //it's necessary to wait for termination refReadService before we shutdown acceptReadService
+        //because this service submits tasks to acceptReadService
         refReadService.shutdown();
         try {
             refReadService.awaitTermination(1, TimeUnit.DAYS);
@@ -268,29 +251,13 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         }
 
 
-        finish = System.nanoTime();
-        System.out.println(">>>\tfor loop: " + (finish - start) / 1_000_000_000.0 + "sec");
-
-
-
-
-
-
-
-
-
-
         CloserUtil.close(in);
 
-
-        start = System.nanoTime();
 
         for (final SinglePassSamProgram program : programs) {
             program.finish();
         }
 
-        finish = System.nanoTime();
-        System.out.println(">>>\tprogram.finish(): " + (finish - start) / 1_000_000_000.0 + "sec");
     }
 
     /**
