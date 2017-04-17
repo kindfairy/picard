@@ -34,7 +34,7 @@ import picard.cmdline.CommandLineProgramProperties;
 import picard.cmdline.Option;
 import picard.cmdline.programgroups.Metrics;
 import picard.metrics.GcBiasMetrics;
-//import picard.util.RExecutor;
+import picard.util.RExecutor;
 
 import java.io.File;
 import java.text.NumberFormat;
@@ -113,7 +113,7 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
     /**
      * The location of the R script to do the plotting.
      */
-    //private static final String R_SCRIPT = "picard/analysis/gcBias.R";
+    private static final String R_SCRIPT = "picard/analysis/gcBias.R";
 
     // Usage and parameters
 
@@ -206,13 +206,13 @@ public class CollectGcBiasMetrics extends SinglePassSamProgram {
 
         final NumberFormat fmt = NumberFormat.getIntegerInstance();
         fmt.setGroupingUsed(true);
-        /*
+
         RExecutor.executeFromClasspath(R_SCRIPT,
                 OUTPUT.getAbsolutePath(),
                 SUMMARY_OUTPUT.getAbsolutePath(),
                 CHART_OUTPUT.getAbsolutePath(),
                 String.valueOf(SCAN_WINDOW_SIZE));
-                */
+
     }
 }
 
