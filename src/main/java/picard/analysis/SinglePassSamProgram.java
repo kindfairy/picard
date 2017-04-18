@@ -44,10 +44,7 @@ import picard.cmdline.StandardOptionDefinitions;
 
 import java.io.File;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 /**
  * Super class that is designed to provide some consistent structure between subclasses that
@@ -57,8 +54,11 @@ import java.util.concurrent.TimeUnit;
  * @author Tim Fennell
  */
 public abstract class SinglePassSamProgram extends CommandLineProgram {
+
     private static final int MAX_SIZE = 1000;
-    private static final int SEMAPHORE_PERMITS = 5;
+    private static final int QUEUE_MAX_SIZE = 5;
+
+
     @Option(shortName = StandardOptionDefinitions.INPUT_SHORT_NAME, doc = "Input SAM or BAM file.")
     public File INPUT;
 
@@ -133,16 +133,109 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         }
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         final ProgressLogger progress = new ProgressLogger(log);
 
         //one particular thread for reading a ReferenceSequence from walker
-        ExecutorService refReadService = Executors.newSingleThreadExecutor();
+        ExecutorService refReader = Executors.newSingleThreadExecutor();
+        BlockingQueue<List<SAMRecord>> tasksForRefReader = new LinkedBlockingQueue<>(QUEUE_MAX_SIZE);
 
         //one particular thread for executing method program.acceptRead()
         ExecutorService acceptReadService = Executors.newSingleThreadExecutor();
+        BlockingQueue<List<Pair<SAMRecord, ReferenceSequence>>> tasksForAcceptRead = new LinkedBlockingQueue<>(QUEUE_MAX_SIZE);
 
-        //Limit for tasks into services' queues
-        Semaphore semaphore = new Semaphore(SEMAPHORE_PERMITS);
+        final List<SAMRecord> POISON_PILL = Collections.emptyList();
+
+
+        ExecutorService support1 = Executors.newSingleThreadExecutor();
+        support1.submit(new Runnable() {
+            @Override
+            public void run() {
+                final List<Pair<SAMRecord, ReferenceSequence>> POISON_PILL = Collections.emptyList();
+                while (true) {
+                    try {
+                        final List<SAMRecord> records = tasksForRefReader.take();
+                        if(records.isEmpty()) {
+                            tasksForAcceptRead.add(POISON_PILL);
+                            return;
+                        }else {
+                            refReader.submit(new Runnable() {
+                                @Override
+                                public void run() {
+                                    List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
+                                    for (SAMRecord tmpRecord : records) {
+                                        ReferenceSequence ref;
+                                        if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
+                                            ref = null;
+                                        } else {
+                                            ref = walker.get(tmpRecord.getReferenceIndex());
+                                        }
+                                        pairs.add(new Pair<>(tmpRecord, ref));
+                                    }
+                                    try {
+                                        tasksForAcceptRead.put(pairs);
+                                    } catch (InterruptedException e) {
+                                        e.printStackTrace();
+                                    }
+                                }
+                            }).get();
+                        }
+                    } catch (InterruptedException | ExecutionException e) {
+                        e.printStackTrace();
+                    }
+
+                }
+            }
+        });
+
+
+        ExecutorService support2 = Executors.newSingleThreadExecutor();
+        support2.submit(new Runnable() {
+            @Override
+            public void run() {
+                while (true){
+                    try {
+                        final List<Pair<SAMRecord, ReferenceSequence>> pairs = tasksForAcceptRead.take();
+                        if( pairs.isEmpty() ){
+                            return;
+                        }
+                        acceptReadService.submit(new Runnable() {
+                            @Override
+                            public void run() {
+                                for (Pair<SAMRecord, ReferenceSequence> pair : pairs) {
+                                    for (final SinglePassSamProgram program : programs) {
+                                        program.acceptRead(pair.getKey(), pair.getValue());
+                                    }
+                                }
+                            }
+                        }).get();
+                    } catch (InterruptedException | ExecutionException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        });
+
+
 
         //chunk of SAMRecords
         List<SAMRecord> records = new ArrayList<>(MAX_SIZE);
@@ -156,39 +249,16 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
 
             if (records.size() == MAX_SIZE) {
 
-                semaphore.acquireUninterruptibly();
                 final List<SAMRecord> tmpRecords = records;
                 records = new ArrayList<>(MAX_SIZE);
 
-                refReadService.submit(new Runnable() {
-                    @Override
-                    public void run() {
-                        List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
-                        for (SAMRecord tmpRecord : tmpRecords) {
-                            final ReferenceSequence ref;
-                            if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
-                                ref = null;
-                            } else {
-                                ref = walker.get(tmpRecord.getReferenceIndex());
-                            }
-                            pairs.add(new Pair<>(tmpRecord, ref));
-                        }
-                        acceptReadService.submit(new Runnable() {
-                            @Override
-                            public void run() {
-                                for (Pair<SAMRecord, ReferenceSequence> pair : pairs) {
-                                    for (final SinglePassSamProgram program : programs) {
-                                        program.acceptRead(pair.getKey(), pair.getValue());
-                                    }
-                                }
-                                semaphore.release();
-                            }
-                        });
-                    }
-                });
+                try {
+                    tasksForRefReader.put(tmpRecords);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
 
             }
-
 
             progress.record(record);
 
@@ -204,51 +274,65 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
         }
         //need to process last chunk with size < MAX_SIZE
         {
-            semaphore.acquireUninterruptibly();
             List<SAMRecord> tmpRecords = records;
 
-            refReadService.submit(new Runnable() {
-                @Override
-                public void run() {
-                    List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
-                    for (SAMRecord tmpRecord : tmpRecords) {
-                        final ReferenceSequence ref;
-                        if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
-                            ref = null;
-                        } else {
-                            ref = walker.get(tmpRecord.getReferenceIndex());
-                        }
-                        pairs.add(new Pair<>(tmpRecord, ref));
-                    }
-                    acceptReadService.submit(new Runnable() {
-                        @Override
-                        public void run() {
-                            for (Pair<SAMRecord, ReferenceSequence> pair : pairs) {
-                                for (final SinglePassSamProgram program : programs) {
-                                    program.acceptRead(pair.getKey(), pair.getValue());
-                                }
-                            }
-                            semaphore.release();
-                        }
-                    });
-                }
-            });
+            tasksForRefReader.add(tmpRecords);
+
         }
+
+        tasksForRefReader.add(POISON_PILL);
 
         //it's necessary to wait for termination refReadService before we shutdown acceptReadService
         //because this service submits tasks to acceptReadService
-        refReadService.shutdown();
+
+        support1.shutdown();
         try {
-            refReadService.awaitTermination(1, TimeUnit.DAYS);
+            support1.awaitTermination(1, TimeUnit.DAYS);
+        }catch (InterruptedException e){
+            e.printStackTrace();
+        }
+
+
+        refReader.shutdown();
+        try{
+            refReader.awaitTermination(1, TimeUnit.DAYS);
+        }catch (InterruptedException e){
+            e.printStackTrace();
+        }
+
+        support2.shutdown();
+        try {
+            support2.awaitTermination(1, TimeUnit.DAYS);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
+
         acceptReadService.shutdown();
         try {
             acceptReadService.awaitTermination(1, TimeUnit.DAYS);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
         CloserUtil.close(in);
