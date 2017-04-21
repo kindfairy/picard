@@ -36,14 +36,18 @@ import htsjdk.samtools.util.IOUtil;
 import htsjdk.samtools.util.Log;
 import htsjdk.samtools.util.ProgressLogger;
 import htsjdk.samtools.util.SequenceUtil;
+import javafx.util.Pair;
 import picard.PicardException;
 import picard.cmdline.CommandLineProgram;
 import picard.cmdline.Option;
 import picard.cmdline.StandardOptionDefinitions;
 
 import java.io.File;
-import java.util.Arrays;
-import java.util.Collection;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Super class that is designed to provide some consistent structure between subclasses that
@@ -53,6 +57,8 @@ import java.util.Collection;
  * @author Tim Fennell
  */
 public abstract class SinglePassSamProgram extends CommandLineProgram {
+    private static final int MAX_SIZE = 1000;
+    private static final int SEMAPHORE_PERMITS = 5;
     @Option(shortName = StandardOptionDefinitions.INPUT_SHORT_NAME, doc = "Input SAM or BAM file.")
     public File INPUT;
 
@@ -84,9 +90,11 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
                                 final long stopAfter,
                                 final Collection<SinglePassSamProgram> programs) {
 
+
         // Setup the standard inputs
         IOUtil.assertFileIsReadable(input);
         final SamReader in = SamReaderFactory.makeDefault().referenceSequence(referenceSequence).open(input);
+
 
         // Optionally load up the reference sequence and double check sequence dictionaries
         final ReferenceSequenceFileWalker walker;
@@ -116,6 +124,7 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             }
         }
 
+
         // Call the abstract setup method!
         boolean anyUseNoRefReads = false;
         for (final SinglePassSamProgram program : programs) {
@@ -126,19 +135,62 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
 
         final ProgressLogger progress = new ProgressLogger(log);
 
-        for (final SAMRecord rec : in) {
-            final ReferenceSequence ref;
-            if (walker == null || rec.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
-                ref = null;
-            } else {
-                ref = walker.get(rec.getReferenceIndex());
+        //one particular thread for reading a ReferenceSequence from walker
+        ExecutorService refReadService = Executors.newSingleThreadExecutor();
+
+        //one particular thread for executing method program.acceptRead()
+        ExecutorService acceptReadService = Executors.newSingleThreadExecutor();
+
+        //Limit for tasks into services' queues
+        Semaphore semaphore = new Semaphore(SEMAPHORE_PERMITS);
+
+        //chunk of SAMRecords
+        List<SAMRecord> records = new ArrayList<>(MAX_SIZE);
+
+        Iterator<SAMRecord> it = in.iterator();
+        while (it.hasNext()) {
+
+
+            final SAMRecord record = it.next();
+            records.add(record);
+
+            if (records.size() == MAX_SIZE) {
+
+                semaphore.acquireUninterruptibly();
+                final List<SAMRecord> tmpRecords = records;
+                records = new ArrayList<>(MAX_SIZE);
+
+                refReadService.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
+                        for (SAMRecord tmpRecord : tmpRecords) {
+                            final ReferenceSequence ref;
+                            if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
+                                ref = null;
+                            } else {
+                                ref = walker.get(tmpRecord.getReferenceIndex());
+                            }
+                            pairs.add(new Pair<>(tmpRecord, ref));
+                        }
+                        acceptReadService.submit(new Runnable() {
+                            @Override
+                            public void run() {
+                                for (Pair<SAMRecord, ReferenceSequence> pair : pairs) {
+                                    for (final SinglePassSamProgram program : programs) {
+                                        program.acceptRead(pair.getKey(), pair.getValue());
+                                    }
+                                }
+                                semaphore.release();
+                            }
+                        });
+                    }
+                });
+
             }
 
-            for (final SinglePassSamProgram program : programs) {
-                program.acceptRead(rec, ref);
-            }
 
-            progress.record(rec);
+            progress.record(record);
 
             // See if we need to terminate early?
             if (stopAfter > 0 && progress.getCount() >= stopAfter) {
@@ -146,22 +198,78 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
             }
 
             // And see if we're into the unmapped reads at the end
-            if (!anyUseNoRefReads && rec.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
+            if (!anyUseNoRefReads && record.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
                 break;
             }
         }
+        //need to process last chunk with size < MAX_SIZE
+        {
+            semaphore.acquireUninterruptibly();
+            List<SAMRecord> tmpRecords = records;
+
+            refReadService.submit(new Runnable() {
+                @Override
+                public void run() {
+                    List<Pair<SAMRecord, ReferenceSequence>> pairs = new ArrayList<>(MAX_SIZE);
+                    for (SAMRecord tmpRecord : tmpRecords) {
+                        final ReferenceSequence ref;
+                        if (walker == null || tmpRecord.getReferenceIndex() == SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
+                            ref = null;
+                        } else {
+                            ref = walker.get(tmpRecord.getReferenceIndex());
+                        }
+                        pairs.add(new Pair<>(tmpRecord, ref));
+                    }
+                    acceptReadService.submit(new Runnable() {
+                        @Override
+                        public void run() {
+                            for (Pair<SAMRecord, ReferenceSequence> pair : pairs) {
+                                for (final SinglePassSamProgram program : programs) {
+                                    program.acceptRead(pair.getKey(), pair.getValue());
+                                }
+                            }
+                            semaphore.release();
+                        }
+                    });
+                }
+            });
+        }
+
+        //it's necessary to wait for termination refReadService before we shutdown acceptReadService
+        //because this service submits tasks to acceptReadService
+        refReadService.shutdown();
+        try {
+            refReadService.awaitTermination(1, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        acceptReadService.shutdown();
+        try {
+            acceptReadService.awaitTermination(1, TimeUnit.DAYS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
 
         CloserUtil.close(in);
+
 
         for (final SinglePassSamProgram program : programs) {
             program.finish();
         }
+
     }
 
-    /** Can be overriden and set to false if the section of unmapped reads at the end of the file isn't needed. */
-    protected boolean usesNoRefReads() { return true; }
+    /**
+     * Can be overriden and set to false if the section of unmapped reads at the end of the file isn't needed.
+     */
+    protected boolean usesNoRefReads() {
+        return true;
+    }
 
-    /** Should be implemented by subclasses to do one-time initialization work. */
+    /**
+     * Should be implemented by subclasses to do one-time initialization work.
+     */
     protected abstract void setup(final SAMFileHeader header, final File samFile);
 
     /**
@@ -171,7 +279,9 @@ public abstract class SinglePassSamProgram extends CommandLineProgram {
      */
     protected abstract void acceptRead(final SAMRecord rec, final ReferenceSequence ref);
 
-    /** Should be implemented by subclasses to do one-time finalization work. */
+    /**
+     * Should be implemented by subclasses to do one-time finalization work.
+     */
     protected abstract void finish();
 
 }
